@@ -1,9 +1,10 @@
-    %% Step 01 -- Read Geotiff
+
+%% Step 01 -- Read Geotiff
     Observations = ReadGeoTiff(DirectoryName,PointOfInterest);
     %% Step 02 -- PreProcess Chl Data
-    Observations = FillnSmooth(Observations);
+    Observations = FillnSmooth(Observations); % Observations are used as timetables
     %% Step 03 -- Find optimal width of the sliding windows
-    [window] = OptimalWindow(CaseStudy,HydroInp,MeteoInp,Observations,forecast_horizon);
+    [window] = OptimalWindow(CaseStudy,HydroInp,MeteoInp,Observations,point,forecast_horizon);
     % create final training dataset
     [predictors,target] = CreateTrainingData(CaseStudy,HydroInp,MeteoInp,Observations,point,window,forecast_horizon);
     [norm_data,C,S] = normalize([predictors target]);
@@ -27,7 +28,7 @@
         plotPartialDependence(rf,i,norm_data(:,PredictorList),"Conditional","absolute")
         title("")
     end
-    %% Estimate Shapley values
+    % Estimate Shapley values
     Ypred = predict(rf, norm_data(:,PredictorList));
     tbl = norm_data(:,PredictorList);
     f = @(tbl) predict(rf,tbl);
@@ -114,7 +115,7 @@ function [window] = OptimalWindow(CaseStudy,HydroInp,MeteoInp,Observations,forec
                             'Verbose',0,'UseParallel',true,'PlotFcn',[]);
                 loss(i,j) = results.MinObjective;
     
-                clear Window predictors target weights results
+                clear Window predictors target results
             end
         end 
         minimum = min(min(loss));
@@ -180,7 +181,6 @@ if contains(CaseStudy,'us-harsha') == 1
         predictors.tp = (tp);%7
         %
         target = Observations.value;
-        weights = Observations.weight;
         predictors = table2array(predictors);
 elseif contains(CaseStudy,'au-hume') == 1
     
@@ -247,7 +247,6 @@ elseif contains(CaseStudy,'au-hume') == 1
         predictors.tp02 = (tp02);
         %
         target = Observations.value;
-        weights = Observations.weight;
         predictors = table2array(predictors);
     elseif point ==3
         tn01 = zeros(length(Observations.time),1);
@@ -321,7 +320,6 @@ elseif contains(CaseStudy,'au-hume') == 1
         predictors.tp03 = (tp03);
         %
         target = Observations.value;
-        weights = Observations.weight;
         predictors = table2array(predictors);
     else
         tn = zeros(length(Observations.time),1);
@@ -377,7 +375,6 @@ elseif contains(CaseStudy,'au-hume') == 1
         predictors.tp01 = (tp);%7
         %
         target = Observations.value;
-        weights = Observations.weight;
         predictors = table2array(predictors);
     end
 elseif contains(CaseStudy,'it-sardinia') == 1
@@ -433,7 +430,6 @@ elseif contains(CaseStudy,'it-sardinia') == 1
         predictors.tp = (tp);%7
         %
         target = Observations.value;
-        weights = Observations.weight;
         predictors = table2array(predictors);
 end
     
@@ -465,7 +461,7 @@ function [MdlRF,bestHyperparameters,Importance] = TrainRF(predictors,target,Pred
         minnumPTS = round(sqrt(size(prd,2))); % for low dimensions: Random forests: Some methodological insights. ArXiv preprint arXiv:0811.3619. URL: https://arxiv.org/abs/0811.3619.
         maxnumPTS = size(prd,2)-1; %
     end
-    maxnumsplits = length(trg)-1;
+    maxnumsplits = length(target)-1;
     minLS = optimizableVariable('minLS',[minMinLS,maxMinLS],'Type','integer');
     numPTS = optimizableVariable('numPTS',[minnumPTS,maxnumPTS],'Type','integer');
     NumSplits = optimizableVariable('NumSplits',[1,maxnumsplits],'Type','integer');
@@ -478,7 +474,7 @@ function [MdlRF,bestHyperparameters,Importance] = TrainRF(predictors,target,Pred
     bestHyperparameters = results.XAtMinObjective;
    %%
     MdlRF= TreeBagger(bestHyperparameters.numTrees,prd,...
-       trg,'Method','regression',...
+       target,'Method','regression',...
         'OOBPrediction','on','OOBPredictorImportance','on','Surrogate','on',...
         'MinLeafSize',bestHyperparameters.minLS,...
         'NumPredictorstoSample',bestHyperparameters.numPTS, ...
@@ -486,7 +482,21 @@ function [MdlRF,bestHyperparameters,Importance] = TrainRF(predictors,target,Pred
         'MaxNumSplits',bestHyperparameters.NumSplits);
     Importance = MdlRF.OOBPermutedPredictorDeltaError;
 end
-
+function lossfun = ObjFun(params,predictors,target)
+    %%  
+    ypred = zeros(length(target),5);
+    for i=1:5
+        cvp = cvpartition(length(target),'KFold',5);
+        tTr = templateTree('PredictorSelection','interaction-curvature','Surrogate','on', ...
+        'Reproducible','on','MaxNumSplits',params.NumSplits,...
+        'MinLeafSize',params.minLS,'NumVariablesToSample',params.numPTS);
+        randomForest = fitrensemble(predictors,target,'Method','Bag',...
+        'NumLearningCycles',params.numTrees,...
+        'Learners',tTr,'CrossVal','on','CVPartition',cvp);
+        ypred(:,i) = kfoldPredict(randomForest);
+    end
+    lossfun = mean(abs(target-mean(ypred,2)));
+end
 function [CVpredictions] = CrossValErrors(bestHyperparameters,predictors,target)
     cvp = cvpartition(length(target),'KFold',5);
     tTr = templateTree('PredictorSelection','interaction-curvature','Surrogate','on', ...
