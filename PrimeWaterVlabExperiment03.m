@@ -28,7 +28,6 @@
     HydroInp.Properties.VariableNames(3) = "cctp";
     HydroInp.Properties.VariableNames(1) = "time";
     %% Step 02 -- PreProcess Chl Data
-
     Observations = FillnSmooth(Observations);
     %% Step 03 -- Find optimal width of the sliding windows
     [window] = OptimalWindow(CaseStudy,HydroInp,MeteoInp,Observations,point,forecast_horizon);
@@ -37,34 +36,16 @@
     [norm_data,C,S] = normalize([predictors target]);
     %% Step 04 -- Feature Selection
 	PredictorList = FeatureSelection(norm_data(:,1:end-1),norm_data(:,end));
-    %% Step 05 -- Model training using k-fold cross-validation
-    [rf,bestHyperparameters,importance] = TrainRF(norm_data(:,1:end-1),norm_data(:,end),PredictorList);
-    outofbagError = oobError(rf,'Mode','Ensemble');
-    % estimate cross-validation errors
-    [CVpredictions] = CrossValErrors(bestHyperparameters,norm_data(:,1:end-1),norm_data(:,end));
-    CVpredictions = CVpredictions.*S(end)+C(end);
-    CVerrors = CVpredictions - target;
-    %% Step 06 - Model Interpretation
-    % Plot Individual Conditional Expectation Plots
-    plotsize = length(PredictorList);
-    figure
-    t = tiledlayout(2,plotsize-2,"TileSpacing","compact");
-    title(t,"Individual Conditional Expectation Plots")
-    for i = 1 : plotsize
-        nexttile
-        plotPartialDependence(rf,i,norm_data(:,PredictorList),"Conditional","absolute")
-        title("")
-    end
-    %% Estimate Shapley values
-    Ypred = predict(rf, norm_data(:,PredictorList));
-    tbl = norm_data(:,PredictorList);
-    f = @(tbl) predict(rf,tbl);
-    explainer = shapley(f,tbl);
-    for i=1:length(Ypred)
-        explainer = fit(explainer,tbl(i,:));
-        ShapleyVal(:,i) = explainer.ShapleyValues.ShapleyValue;
-    end
-   
+    %% Step 05 -- Model training out-of-bag errors
+    [qrf01,bestHyperparametersRF,~] = TrainRF(norm_data(:,1:end-1),norm_data(:,end),PredictorList);
+    %% Step 06 - Model training using out-of-bag quantile errors
+    [qrf02,bestHyperparametersQRF,~] = TrainQRF(norm_data(:,1:end-1),norm_data(:,end),PredictorList);
+   %% Step 07 - Model comparison
+    [RS1,AW1,RS2,AW2] = EvalUnc(qrf01,qrf02,norm_data(:,1:end-1),norm_data(:,end),0.90);
+    [~,mean_crpsQRF01] = Crps(qrf01,norm_data(:,1:end-1),norm_data(:,end));
+    [~,mean_crpsQRF02] = Crps(qrf02,norm_data(:,1:end-1),norm_data(:,end));
+    %%
+
 function Observations = ReadGeoTiff(DirectoryName,PointOfInterest)
 %% detect all geotifs residing in the directory
 cd(DirectoryName)
@@ -654,31 +635,89 @@ function [MdlRF,bestHyperparameters,Importance] = TrainRF(predictors,target,Pred
         'MaxNumSplits',bestHyperparameters.NumSplits);
     Importance = MdlRF.OOBPermutedPredictorDeltaError;
 end
-
 function lossfun = ObjFun(params,predictors,target)
-    %%  
-    ypred = zeros(length(target),5);
-    for i=1:5
-        cvp = cvpartition(length(target),'KFold',5);
-        tTr = templateTree('PredictorSelection','interaction-curvature','Surrogate','on', ...
-        'Reproducible','on','MaxNumSplits',params.NumSplits,...
-        'MinLeafSize',params.minLS,'NumVariablesToSample',params.numPTS);
-        randomForest = fitrensemble(predictors,target,'Method','Bag',...
-        'NumLearningCycles',params.numTrees,...
-        'Learners',tTr,'CrossVal','on','CVPartition',cvp);
-        ypred(:,i) = kfoldPredict(randomForest);
-    end
-    lossfun = mean(abs(target-mean(ypred,2)));
+    %% 
+    randomForest = TreeBagger(params.numTrees,predictors,...
+    target,'Method','regression','Surrogate','on',...
+    'OOBPrediction','on','OOBPredictorImportance','on','PredictorSelection', 'interaction-curvature',...
+    'MinLeafSize',params.minLS,'NumPredictorstoSample',params.numPTS,...
+    'MaxNumSplits',params.NumSplits);
+     lossfun = oobError(randomForest,'Mode','Ensemble','Quantile',0.9);
 end
 
-function [CVpredictions] = CrossValErrors(bestHyperparameters,predictors,target)
-    cvp = cvpartition(length(target),'KFold',5);
-    tTr = templateTree('PredictorSelection','interaction-curvature','Surrogate','on', ...
-    'Reproducible','on','MaxNumSplits',bestHyperparameters.NumSplits,...
-    'MinLeafSize',bestHyperparameters.minLS,'NumVariablesToSample',bestHyperparameters.numPTS);
+function [MdlQRF,bestHyperparameters] = TrainQRF(predictors,target,PredictorList)
+    %
+    prd = predictors(:,PredictorList);
+    minMinLS = max(5,round(size(prd,1)/40)); % 5 after breiman
+    maxMinLS = round(size(prd,1)/10);
+    minnumPTS = round(sqrt(size(prd,2))); % for low dimensions: Random forests: Some methodological insights. ArXiv preprint arXiv:0811.3619. URL: https://arxiv.org/abs/0811.3619.
+    maxnumPTS = size(prd,2)-1; %
+    maxnumsplits = round(size(predictors,1)/3);
+    minLS = optimizableVariable('minLS',[minMinLS,maxMinLS],'Type','integer');
+    numPTS = optimizableVariable('numPTS',[minnumPTS,maxnumPTS],'Type','integer');
+    NumSplits = optimizableVariable('NumSplits',[1,maxnumsplits],'Type','integer');
+    numTrees = optimizableVariable('numTrees',[50,1000],'Type','integer');
+    hyperparametersRF = [minLS;numPTS;NumSplits;numTrees];
+    %%
+    results = bayesopt(@(params)ObjFunQRF(params,prd,target),...
+                hyperparametersRF,'AcquisitionFunctionName','expected-improvement-plus','MaxObjectiveEvaluations',100,...
+                'Verbose',0,'UseParallel',true,'PlotFcn',[]);
+    bestHyperparameters = results.XAtMinObjective;
+    MdlQRF = TreeBagger(bestHyperparameters.numTrees,prd,...
+        trg,'Method','regression',...
+        'OOBPrediction','on','OOBPredictorImportance','on','Surrogate','on',...
+        'MinLeafSize',bestHyperparameters.minLS,...
+        'NumPredictorstoSample',bestHyperparameters.numPTS, ...
+        'PredictorSelection', 'interaction-curvature',...
+        'MaxNumSplits',bestHyperparameters.NumSplits);
+end
+function lossfun = ObjFunQRF(params,predictors,target)
+    %% 
+    randomForest = TreeBagger(params.numTrees,predictors,...
+    target,'Method','regression','Surrogate','on',...
+    'OOBPrediction','on','OOBPredictorImportance','on','PredictorSelection', 'interaction-curvature',...
+    'MinLeafSize',params.minLS,'NumPredictorstoSample',params.numPTS,...
+    'MaxNumSplits',params.NumSplits);
+     lossfun = oobQuantileError(randomForest,'Mode','Ensemble','Quantile',0.9);
+end
+
+function [crps,mean_crps] = Crps(mdl,predictors,target)
+    percentiles = [0:0.05:1];
+    crps = zeros(length(target),1);
+    %%
     
-    randomForest = fitrensemble(predictors,target,'Method','Bag',...
-    'NumLearningCycles',bestHyperparameters.numTrees,...
-    'Learners',tTr,'CrossVal','on','CVPartition',cvp);
-    CVpredictions = kfoldPredict(randomForest);
+    for i =1:length(target)
+        [ECDFobs,xobs] = ecdf(target(i));
+        
+        for j=1:length(percentiles)
+            fval(j,1) = quantilePredict(mdl,predictors(i,:),'Quantile',percentiles(j));
+        end
+        [ECDFpred,xpred] = ecdf(fval);
+        for j=1:length(ECDFpred)
+            if xpred(j)<xobs(1)
+                ecdfval = ECDFobs(1,1);
+            else
+                 ecdfval = ECDFobs(end,1);
+            end
+            if ECDFpred(j,1)>ecdfval
+                indicator = 1;
+            else
+                indicator = 0;
+            end
+            crps_inner(j,1) = (ECDFpred(j,1) - indicator).^2;
+        end
+        crps(i,1)= trapz(xpred,crps_inner);
+        clear crps_inner ECDFpred  xpred
+    end
+    mean_crps = mean(crps);
+end
+
+function [RS1,AW1,RS2,AW2] = EvalUnc(Model1,Model2,predictors,target,Quantile)
+    q1 = quantilePredict(Model1,predictors,'Quantile',Quantile);
+    RS1 = (length(find(q1(:,1)<target&q1(:,2)>target))/length(predictors))*100;
+    AW1 = mean((q1(:,2)-q1(:,1)));
+    
+    q2 = quantilePredict(Model2,predictors,'Quantile',Quantile);
+    RS2 = (length(find(q2(:,1)<target&q2(:,2)>target))/length(predictors))*100;
+    AW2 = mean((q2(:,2)-q2(:,1)));
 end
