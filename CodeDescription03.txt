@@ -1,0 +1,11 @@
+This script calls all the necessary functions to perform the analysis of Experiment C3.
+
+Initially, gridded data for (a) meteorological variables (air temperature, solar radiation, total precipitation, wind speed), and (b) remotely sensed chlorophyll-a concentrations are formulated as time-series data corresponding to specific areas of interest (AOIs) within the water bodies.
+
+Then, the time-series data of chlorophyll-a values are pre-processed to (a) fill in missing data, and (b) smooth noisy inputs. In addition, predictors and target values are normalized using z-score.
+
+Subsequently, the script searches for the optimal width of the sliding window strategy employed for the predictions. Once the windows are estimated, a feature selection process takes place to reduce the dimensionality of the model.
+
+Then, two alternate quantile regression forests (QRFs) are developed using a Bayesian optimization approach for the minimization of (a) out-of-bag errors (QRF01), and (b) out-of-bag quantile errors (QRF02). 
+
+Ultimately, the two QRFs are evaluated considering (a) the difference between the cumulative distribution functions of the QRFs and the empirical CDF of the observations, (b) the reliability of the predictions, and (c) the sharpness of the predictions for a 90% nominal probability level.

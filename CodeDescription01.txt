@@ -1,0 +1,9 @@
+This script calls all the necessary functions to perform the analysis of Experiment C1.
+
+Initially, gridded data for (a) meteorological variables (air temperature, solar radiation, total precipitation, wind speed), and (b) remotely sensed chlorophyll-a concentrations are formulated as time-series data corresponding to specific areas of interest (AOIs) within the water bodies.
+
+Then, the time-series data of chlorophyll-a values are pre-processed to (a) fill in missing data, and (b) smooth noisy inputs. In addition, predictors and target values are normalized using z-score.
+
+Subsequently, the script searches for the optimal width of the sliding window strategy employed for the predictions. Once the windows are estimated, a feature selection process takes place to reduce the dimensionality of the model.
+
+Ultimately, the model is developed using a k-fold cross validation strategy and predictions are interpreted using visualization tools (individual conditional expectation plots and partial dependence plots) and Shapley values.
